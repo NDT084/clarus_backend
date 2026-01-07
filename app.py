@@ -5,7 +5,7 @@ from flask_cors import CORS
 
 from xai_sdk import Client
 from xai_sdk.chat import user as grok_user, system as grok_system
-from xai_sdk.tools import web_search, x_search  # outils de recherche web/X [web:999]
+from xai_sdk.tools import web_search, x_search  # outils de recherche web/X
 
 app = Flask(__name__)
 CORS(app)
@@ -13,7 +13,7 @@ CORS(app)
 # ----------------- CONFIG GROK (xAI) -----------------
 # Sur Render/local : définir GROK_API_KEY ou XAI_API_KEY
 GROK_API_KEY = os.environ.get("GROK_API_KEY") or os.environ.get("XAI_API_KEY")
-grok_client = Client(api_key=GROK_API_KEY, timeout=3600)  # [web:929]
+grok_client = Client(api_key=GROK_API_KEY, timeout=120)
 
 # ----------------- CONFIG NODE (MySQL) -----------------
 NODE_API_BASE = os.environ.get("NODE_API_BASE", "http://localhost:4000")
@@ -185,13 +185,13 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
                 "Va directement à l'information utile, sauf si une formule de politesse est vraiment nécessaire.\n"
             )
 
-        # ----- Utiliser l'historique -----
+        # ----- Utiliser l'historique (tronqué) -----
         if history:
             base_prompt += (
                 "\nHistorique récent de la conversation. "
                 "Garde la cohérence avec ce contexte et évite de répéter les mêmes explications :\n"
             )
-            for h in history[-5:]:
+            for h in history[-3:]:
                 base_prompt += f"{h}\n"
 
         # ----- Adapter un peu le style en fonction de l'historique -----
@@ -212,16 +212,14 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
         if not GROK_API_KEY:
             raise RuntimeError("GROK_API_KEY / XAI_API_KEY non défini(e).")
 
-        # Modèle avec outils de recherche web/X [web:999]
         chat = grok_client.chat.create(
-            model="grok-4-1-fast",  # adapte si besoin selon les modèles dispos
+            model="grok-4-1-fast",
             tools=[
                 web_search(enable_image_understanding=True),
                 x_search(enable_image_understanding=True),
             ],
         )
 
-        # Message système = persona Clarus + autorisation d'utiliser le web
         chat.append(
             grok_system(
                 "Tu es Clarus, un assistant virtuel francophone spécialisé dans les démarches administratives au Sénégal.\n"
@@ -230,13 +228,10 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
             )
         )
 
-        # Message utilisateur = prompt complet
         chat.append(grok_user(base_prompt))
 
         response = chat.sample()
         reply = (getattr(response, "content", "") or "").strip()
-
-        # ---------------------------------------------------------
 
         if not reply:
             reply = generate_local_reply(message)
