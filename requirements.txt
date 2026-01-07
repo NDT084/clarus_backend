@@ -1,5 +1,4 @@
+xai-sdk
 flask
 flask-cors
-gunicorn
-google-genai
 requests
