@@ -2,11 +2,10 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-# from google import genai
-# from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
 
 from xai_sdk import Client
-from xai_sdk.chat import user as grok_user, system as grok_system  # [web:929]
+from xai_sdk.chat import user as grok_user, system as grok_system
+from xai_sdk.tools import web_search, x_search  # outils de recherche web/X [web:999]
 
 app = Flask(__name__)
 CORS(app)
@@ -209,23 +208,32 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
         # ----- Question actuelle -----
         base_prompt += f"\nQuestion de l'utilisateur : {text}\n"
 
-        # ------------- APPEL GROK (remplace Gemini) -------------
+        # ------------- APPEL GROK (avec accès web) -------------
         if not GROK_API_KEY:
             raise RuntimeError("GROK_API_KEY / XAI_API_KEY non défini(e).")
 
-        # Crée un chat Grok (modèle à ajuster si besoin : "grok-3", "grok-4-fast", etc.) [web:929][web:949]
-        chat = grok_client.chat.create(model="grok-4")
+        # Modèle avec outils de recherche web/X [web:999]
+        chat = grok_client.chat.create(
+            model="grok-4-1-fast",  # adapte si besoin selon les modèles dispos
+            tools=[
+                web_search(enable_image_understanding=True),
+                x_search(enable_image_understanding=True),
+            ],
+        )
 
-        # Message système = persona Clarus
+        # Message système = persona Clarus + autorisation d'utiliser le web
         chat.append(
             grok_system(
-                "Tu es Clarus, un assistant virtuel francophone spécialisé dans les démarches administratives au Sénégal."
+                "Tu es Clarus, un assistant virtuel francophone spécialisé dans les démarches administratives au Sénégal.\n"
+                "Quand c'est utile, tu peux faire des recherches en temps réel sur Internet et sur X pour vérifier "
+                "ou mettre à jour tes informations, surtout pour l'actualité, les chiffres récents et les changements de procédures."
             )
         )
+
         # Message utilisateur = prompt complet
         chat.append(grok_user(base_prompt))
 
-        response = chat.sample()  # [web:929][web:949]
+        response = chat.sample()
         reply = (getattr(response, "content", "") or "").strip()
 
         # ---------------------------------------------------------
