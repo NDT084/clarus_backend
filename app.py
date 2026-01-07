@@ -2,13 +2,19 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+# from google import genai
+# from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
+
+from xai_sdk import Client
+from xai_sdk.chat import user as grok_user, system as grok_system  # [web:929]
 
 app = Flask(__name__)
 CORS(app)
 
-# ----------------- CONFIG GROK -----------------
-GROK_API_KEY = os.environ.get("GROK_API_KEY")  # ou XAI_API_KEY, selon ton choix
-GROK_API_URL = "https://api.x.ai/v1/chat/completions"  # endpoint compatible OpenAI
+# ----------------- CONFIG GROK (xAI) -----------------
+# Sur Render/local : définir GROK_API_KEY ou XAI_API_KEY
+GROK_API_KEY = os.environ.get("GROK_API_KEY") or os.environ.get("XAI_API_KEY")
+grok_client = Client(api_key=GROK_API_KEY, timeout=3600)  # [web:929]
 
 # ----------------- CONFIG NODE (MySQL) -----------------
 NODE_API_BASE = os.environ.get("NODE_API_BASE", "http://localhost:4000")
@@ -16,14 +22,18 @@ NODE_API_BASE = os.environ.get("NODE_API_BASE", "http://localhost:4000")
 # ----------------- HISTORIQUE DES CONVERSATIONS -----------------
 conversation_history = {}
 
-# ---------- Fonctions locales inchangées (salutations, règles, etc.) ----------
 
 def is_greeting(text: str) -> bool:
+    """
+    Détecte si le message est principalement une salutation courte.
+    Exemple: 'salut', 'bonjour', 'salam', 'hey', 'bjr', etc.
+    """
     t = (text or "").lower().strip()
     if not t:
         return False
 
     greetings = ["bonjour", "bonsoir", "salut", "bjr", "slt", "salam", "hey", "coucou"]
+    # message court = principalement une salutation (1 à 3 mots)
     return any(g in t for g in greetings) and len(t.split()) <= 3
 
 
@@ -90,6 +100,10 @@ def generate_local_reply(message: str) -> str:
 
 
 def infer_style_from_history(history: list[str]) -> str:
+    """
+    Déduit quelques indices simples sur le style de l'utilisateur
+    en fonction des derniers messages.
+    """
     if not history:
         return ""
 
@@ -115,48 +129,6 @@ def infer_style_from_history(history: list[str]) -> str:
 
     return ""
 
-# ---------- Appel à Grok via l’API ----------
-
-def call_grok(prompt: str) -> str:
-    """
-    Appelle Grok (xAI) en mode chat/completions compatible OpenAI.
-    """
-    if not GROK_API_KEY:
-        raise RuntimeError("GROK_API_KEY non défini dans les variables d'environnement.")
-
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "model": "grok-4",  # ou le modèle que tu as (grok-3, grok-2, etc.)
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Tu es Clarus, un assistant virtuel francophone spécialisé "
-                    "dans les démarches administratives au Sénégal et les questions utiles du quotidien."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0.6,
-    }
-
-    resp = requests.post(GROK_API_URL, json=payload, headers=headers, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-
-    # Format OpenAI‑like : choices[0].message.content
-    try:
-        return (data["choices"][0]["message"]["content"] or "").strip()
-    except Exception:
-        return ""
-
 
 def generate_reply(message: str, session_id: str = "default", mode: str = "prof") -> str:
     text = (message or "").strip()
@@ -166,7 +138,7 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
     try:
         history = conversation_history.get(session_id, [])
 
-        # ---- Prompt de base ----
+        # ---- Prompt de base : généraliste + éthique ----
         base_prompt = (
             "Tu es Clarus, un assistant virtuel francophone.\n"
             "Ta priorité principale est d'aider pour les démarches administratives au Sénégal "
@@ -182,7 +154,7 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
             "et propose éventuellement une piste générale.\n"
         )
 
-        # ---- Mode ----
+        # ----- Comportement selon le mode -----
         if mode == "prof":
             base_prompt += (
                 "Tu as un ton pédagogique, bienveillant et clair. "
@@ -198,13 +170,15 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
         else:
             base_prompt += "Réponds de façon claire, courte et bienveillante.\n"
 
-        # ---- Salutations / contexte ----
+        # ----- Gestion des salutations + contexte -----
         user_says_hello = is_greeting(text)
 
         if user_says_hello and not history:
             base_prompt += (
                 "L'utilisateur vient de te saluer au début de la conversation. "
-                "Commence ta réponse par une salutation du même niveau de familiarité.\n"
+                "Commence ta réponse par une salutation du même niveau de familiarité "
+                "(si l'utilisateur dit 'salut', tu peux répondre 'Salut', "
+                "s'il dit 'bonjour', tu peux répondre 'Bonjour').\n"
             )
         else:
             base_prompt += (
@@ -212,7 +186,7 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
                 "Va directement à l'information utile, sauf si une formule de politesse est vraiment nécessaire.\n"
             )
 
-        # ---- Historique récent ----
+        # ----- Utiliser l'historique -----
         if history:
             base_prompt += (
                 "\nHistorique récent de la conversation. "
@@ -221,24 +195,44 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
             for h in history[-5:]:
                 base_prompt += f"{h}\n"
 
-        # ---- Style selon historique ----
+        # ----- Adapter un peu le style en fonction de l'historique -----
         style_hint = infer_style_from_history(history)
         if style_hint:
             base_prompt += style_hint
 
+        # ----- Adapter la profondeur à la question -----
         base_prompt += (
             "Si la question est simple ou courte, réponds simplement. "
             "Si la question est complexe, structure ta réponse en étapes ou en points clairs.\n"
         )
 
+        # ----- Question actuelle -----
         base_prompt += f"\nQuestion de l'utilisateur : {text}\n"
 
-        # ---- Appel Grok ----
-        reply = call_grok(base_prompt)
+        # ------------- APPEL GROK (remplace Gemini) -------------
+        if not GROK_API_KEY:
+            raise RuntimeError("GROK_API_KEY / XAI_API_KEY non défini(e).")
+
+        # Crée un chat Grok (modèle à ajuster si besoin : "grok-3", "grok-4-fast", etc.) [web:929][web:949]
+        chat = grok_client.chat.create(model="grok-4")
+
+        # Message système = persona Clarus
+        chat.append(
+            grok_system(
+                "Tu es Clarus, un assistant virtuel francophone spécialisé dans les démarches administratives au Sénégal."
+            )
+        )
+        # Message utilisateur = prompt complet
+        chat.append(grok_user(base_prompt))
+
+        response = chat.sample()  # [web:929][web:949]
+        reply = (getattr(response, "content", "") or "").strip()
+
+        # ---------------------------------------------------------
+
         if not reply:
             reply = generate_local_reply(message)
 
-        # ---- Sauvegarde historique ----
         conversation_history.setdefault(session_id, []).append(f"Utilisateur : {text}")
         conversation_history[session_id].append(f"Clarus : {reply}")
 
@@ -248,8 +242,6 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
         print("Erreur Grok:", e)
         return generate_local_reply(message)
 
-
-# ---------- Routes Flask inchangées ----------
 
 @app.route("/chat", methods=["POST"])
 def chat():
