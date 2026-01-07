@@ -1,4 +1,5 @@
-xai-sdk
 flask
 flask-cors
 requests
+xai-sdk
+gunicorn
