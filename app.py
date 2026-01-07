@@ -18,14 +18,28 @@ NODE_API_BASE = os.environ.get("NODE_API_BASE", "http://localhost:4000")
 conversation_history = {}
 
 
+def is_greeting(text: str) -> bool:
+    """
+    Détecte si le message est principalement une salutation courte.
+    Exemple: 'salut', 'bonjour', 'salam', 'hey', 'bjr', etc.
+    """
+    t = (text or "").lower().strip()
+    if not t:
+        return False
+
+    greetings = ["bonjour", "bonsoir", "salut", "bjr", "slt", "salam", "hey", "coucou"]
+    # message court = principalement une salutation (1 à 3 mots)
+    return any(g in t for g in greetings) and len(t.split()) <= 3
+
+
 def generate_local_reply(message: str) -> str:
     text = message.lower().strip()
     if not text:
         return "Pouvez‑vous préciser votre question ?"
 
-    if any(w in text for w in ["bonjour", "bonsoir", "salut", "bjr", "slt", "salam"]):
+    if is_greeting(text):
         return (
-            "Bonjour.\n"
+            "Salut !\n"
             "Je peux vous aider pour vos démarches administratives : passeport, carte d'identité, certificat, etc."
         )
 
@@ -80,29 +94,66 @@ def generate_local_reply(message: str) -> str:
     )
 
 
+def infer_style_from_history(history: list[str]) -> str:
+    """
+    Déduit quelques indices simples sur le style de l'utilisateur
+    en fonction des derniers messages.
+    """
+    if not history:
+        return ""
+
+    text = " ".join(history[-10:]).lower()
+
+    if any(w in text for w in ["examen", "qcm", "question à choix", "test"]):
+        return (
+            "L'utilisateur semble réviser ou s'entraîner. "
+            "Tu peux proposer parfois des exemples de questions ou de mini-exercices.\n"
+        )
+
+    if any(w in text for w in ["code", "python", "flutter", "javascript", "programmation"]):
+        return (
+            "L'utilisateur est développeur. "
+            "Tu peux utiliser un vocabulaire un peu plus technique et des exemples orientés développeur.\n"
+        )
+
+    if any(w in text for w in ["je ne comprends pas", "explique simplement", "simplement"]):
+        return (
+            "L'utilisateur a besoin d'explications simples. "
+            "Utilise des phrases très courtes et des exemples concrets.\n"
+        )
+
+    return ""
+
+
 def generate_reply(message: str, session_id: str = "default", mode: str = "prof") -> str:
-    text = message.strip()
+    text = (message or "").strip()
     if not text:
         return "Pouvez‑vous préciser votre question ?"
 
     try:
         history = conversation_history.get(session_id, [])
 
-        lower = text.lower()
-        user_says_hello = any(
-            w in lower for w in ["bonjour", "bonsoir", "salut", "bjr", "slt", "salam"]
-        )
-
+        # ---- Prompt de base : généraliste + éthique ----
         base_prompt = (
-            "Tu es Clarus, un assistant virtuel francophone pour les démarches "
-            "administratives (passeport, carte d'identité, certificats, etc.) au Sénégal. "
+            "Tu es Clarus, un assistant virtuel francophone.\n"
+            "Ta priorité principale est d'aider pour les démarches administratives au Sénégal "
+            "(passeport, carte d'identité, certificats, etc.).\n"
+            "Tu peux aussi répondre à des questions plus générales (culture, études, informatique, "
+            "mathématiques, actualité factuelle, vie quotidienne), tant que cela reste légal, "
+            "utile et dans un cadre éthique.\n"
+            "Tu dois refuser poliment toute demande illégale, dangereuse ou contraire à l'éthique "
+            "(fraude, violence, haine, harcèlement, contenu sexuel explicite, désinformation, "
+            "collecte de données personnelles sensibles, etc.), "
+            "et expliquer brièvement pourquoi tu refuses.\n"
+            "Si tu n'es pas sûr d'une information, dis-le clairement au lieu d'inventer, "
+            "et propose éventuellement une piste générale.\n"
         )
 
         # ----- Comportement selon le mode -----
         if mode == "prof":
             base_prompt += (
                 "Tu as un ton pédagogique, bienveillant et clair. "
-                "Explique les démarches étape par étape, avec des phrases courtes.\n"
+                "Explique les démarches ou les réponses étape par étape, avec des phrases courtes.\n"
             )
         elif mode == "exam":
             base_prompt += (
@@ -112,23 +163,46 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
                 "Tes réponses doivent être concises et orientées exercice.\n"
             )
         else:
-            base_prompt += (
-                "Réponds de façon claire, courte et bienveillante.\n"
-            )
+            base_prompt += "Réponds de façon claire, courte et bienveillante.\n"
 
-        if user_says_hello:
+        # ----- Gestion des salutations + contexte -----
+        user_says_hello = is_greeting(text)
+
+        if user_says_hello and not history:
             base_prompt += (
-                "L'utilisateur t'a salué, tu peux répondre avec une salutation courte au début.\n"
+                "L'utilisateur vient de te saluer au début de la conversation. "
+                "Commence ta réponse par une salutation du même niveau de familiarité "
+                "(si l'utilisateur dit 'salut', tu peux répondre 'Salut', "
+                "s'il dit 'bonjour', tu peux répondre 'Bonjour').\n"
             )
         else:
-            base_prompt += "Va directement à l'information utile.\n"
+            base_prompt += (
+                "Ne commence pas systématiquement par une salutation. "
+                "Va directement à l'information utile, sauf si une formule de politesse est vraiment nécessaire.\n"
+            )
 
+        # ----- Utiliser l'historique -----
         if history:
-            base_prompt += "\nHistorique récent :\n"
+            base_prompt += (
+                "\nHistorique récent de la conversation. "
+                "Garde la cohérence avec ce contexte et évite de répéter les mêmes explications :\n"
+            )
             for h in history[-5:]:
                 base_prompt += f"{h}\n"
 
-        base_prompt += f"\nQuestion de l'utilisateur : {text}"
+        # ----- Adapter un peu le style en fonction de l'historique -----
+        style_hint = infer_style_from_history(history)
+        if style_hint:
+            base_prompt += style_hint
+
+        # ----- Adapter la profondeur à la question -----
+        base_prompt += (
+            "Si la question est simple ou courte, réponds simplement. "
+            "Si la question est complexe, structure ta réponse en étapes ou en points clairs.\n"
+        )
+
+        # ----- Question actuelle -----
+        base_prompt += f"\nQuestion de l'utilisateur : {text}\n"
 
         google_search_tool = Tool(google_search=GoogleSearch())
         config = GenerateContentConfig(tools=[google_search_tool])
@@ -143,7 +217,10 @@ def generate_reply(message: str, session_id: str = "default", mode: str = "prof"
         if hasattr(response, "text"):
             reply = (response.text or "").strip()
         elif hasattr(response, "content") and response.content:
-            reply = (response.content[0].text or "").strip()
+            try:
+                reply = (response.content[0].text or "").strip()
+            except Exception:
+                reply = ""
 
         if not reply:
             reply = generate_local_reply(message)
@@ -164,7 +241,7 @@ def chat():
     message = data.get("message", "")
     session_id = data.get("session_id", "default")
     user_id = data.get("user_id")
-    mode = data.get("mode", "prof")  # <-- nouveau
+    mode = data.get("mode", "prof")
 
     reply = generate_reply(message, session_id=session_id, mode=mode)
 
